@@ -45,6 +45,32 @@ jobs:
         run: |
           ssh -p "$VM_PORT" "$VM_USER@$VM_HOST" "mkdir -p '$VM_TARGET_DIR'"
 
+      - name: Ensure rsync exists on runner
+        run: |
+          if ! command -v rsync >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y rsync
+          fi
+
+      - name: Ensure rsync exists on VM
+        run: |
+          ssh -p "$VM_PORT" "$VM_USER@$VM_HOST" '
+            if command -v rsync >/dev/null 2>&1; then
+              exit 0
+            fi
+
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update && sudo apt-get install -y rsync
+            elif command -v dnf >/dev/null 2>&1; then
+              sudo dnf install -y rsync
+            elif command -v yum >/dev/null 2>&1; then
+              sudo yum install -y rsync
+            else
+              echo "No supported package manager found to install rsync"
+              exit 1
+            fi
+          '
+
       - name: Sync repository to VM
         run: |
           rsync -az --delete \
