@@ -1,0 +1,11 @@
+services:
+  finlit:
+    build: .
+    container_name: finlit-chatbot
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      - ./.chroma:/app/.chroma
+      - ./data:/app/data

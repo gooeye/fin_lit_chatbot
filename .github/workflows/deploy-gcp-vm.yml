@@ -1,0 +1,57 @@
+name: Deploy to GCP Compute Engine VM
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  copy-repo-to-vm:
+    runs-on: ubuntu-latest
+
+    env:
+      VM_HOST: ${{ secrets.GCP_VM_HOST }}
+      VM_USER: ${{ secrets.GCP_VM_USER }}
+      VM_PORT: ${{ secrets.GCP_VM_PORT }}
+      VM_TARGET_DIR: ${{ secrets.GCP_VM_TARGET_DIR }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        run: |
+          test -n "$VM_HOST" || (echo "Missing secret: GCP_VM_HOST" && exit 1)
+          test -n "$VM_USER" || (echo "Missing secret: GCP_VM_USER" && exit 1)
+          test -n "${{ secrets.GCP_VM_SSH_KEY }}" || (echo "Missing secret: GCP_VM_SSH_KEY" && exit 1)
+
+      - name: Set defaults for optional secrets
+        run: |
+          echo "VM_PORT=${VM_PORT:-22}" >> $GITHUB_ENV
+          echo "VM_TARGET_DIR=${VM_TARGET_DIR:-/home/$VM_USER/fin_lit_chatbot}" >> $GITHUB_ENV
+
+      - name: Start SSH agent and add key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GCP_VM_SSH_KEY }}
+
+      - name: Add VM host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "$VM_PORT" -H "$VM_HOST" >> ~/.ssh/known_hosts
+
+      - name: Ensure target directory exists on VM
+        run: |
+          ssh -p "$VM_PORT" "$VM_USER@$VM_HOST" "mkdir -p '$VM_TARGET_DIR'"
+
+      - name: Sync repository to VM
+        run: |
+          rsync -az --delete \
+            --exclude '.git/' \
+            --exclude '.venv/' \
+            --exclude '.chroma/' \
+            --exclude '__pycache__/' \
+            --exclude '*.pyc' \
+            -e "ssh -p $VM_PORT" \
+            ./ "$VM_USER@$VM_HOST:$VM_TARGET_DIR/"
