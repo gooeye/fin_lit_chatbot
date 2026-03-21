@@ -112,6 +112,8 @@ jobs:
       - name: Sync repository to VM
         run: |
           rsync -az --delete \
+            --no-times \
+            --omit-dir-times \
             --no-owner \
             --no-group \
             --exclude '.git/' \
