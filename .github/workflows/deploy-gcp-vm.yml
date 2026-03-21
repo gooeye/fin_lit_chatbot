@@ -96,9 +96,9 @@ jobs:
 
       - name: Stop app with Docker Compose on VM (best effort)
         run: |
-          ssh -p "$VM_PORT" "$VM_USER@$VM_HOST" '
+          ssh -p "$VM_PORT" "$VM_USER@$VM_HOST" "
             set +e
-            cd "$VM_TARGET_DIR" 2>/dev/null || exit 0
+            cd '$VM_TARGET_DIR' 2>/dev/null || exit 0
             if [ -f docker-compose.yml ] || [ -f compose.yml ] || [ -f compose.yaml ]; then
               if docker compose version >/dev/null 2>&1; then
                 docker compose down
@@ -107,7 +107,7 @@ jobs:
               fi
             fi
             exit 0
-          '
+          "
 
       - name: Sync repository to VM
         run: |
@@ -130,12 +130,12 @@ jobs:
 
       - name: Restart app with Docker Compose on VM
         run: |
-          ssh -p "$VM_PORT" "$VM_USER@$VM_HOST" '
+          ssh -p "$VM_PORT" "$VM_USER@$VM_HOST" "
             set -e
-            cd "$VM_TARGET_DIR"
+            cd '$VM_TARGET_DIR'
             if docker compose version >/dev/null 2>&1; then
               docker compose up -d --build
             else
               sudo docker compose up -d --build
             fi
-          '
+          "
