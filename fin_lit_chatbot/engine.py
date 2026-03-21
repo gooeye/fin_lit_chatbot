@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable
 
 from langchain_openai import ChatOpenAI
@@ -13,6 +12,7 @@ from fin_lit_chatbot.rag import RagService
 from fin_lit_chatbot.routing import fallback_route_intent, parse_router_json
 from fin_lit_chatbot.schema import ChatState
 from fin_lit_chatbot.subgraph_agents import StructuredToolsAgent
+from fin_lit_chatbot.tools import extract_quiz_choice
 
 
 class FinLitBot:
@@ -263,7 +263,7 @@ class FinLitBot:
 
         # Quiz-aware routing: if quiz is already in progress, prioritize continuation checks.
         if quiz_ongoing:
-            if re.fullmatch(r"[ab]", query.lower()):
+            if extract_quiz_choice(query, current_question) is not None:
                 state["topic"] = "money_management"
                 state["task_type"] = "quiz"
                 return state

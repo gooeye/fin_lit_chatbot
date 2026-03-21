@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from langchain_core.tools import BaseTool, tool
@@ -56,15 +57,74 @@ def _score_risk_answers(answers: dict[int, str]) -> dict[str, Any]:
     }
 
 
+def _tokenize(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z]+", text.lower()) if len(w) >= 3}
+
+
+def _option_overlap_score(user_tokens: set[str], option_text: str) -> float:
+    option_tokens = _tokenize(option_text)
+    if not user_tokens or not option_tokens:
+        return 0.0
+    shared = len(user_tokens & option_tokens)
+    return shared / max(1, len(option_tokens))
+
+
+def _contains_any(text: str, phrases: Iterable[str]) -> bool:
+    lower = text.lower()
+    return any(p in lower for p in phrases)
+
+
+def extract_quiz_choice(user_input: str, current_question: int) -> str | None:
+    """Infer deterministic A/B choice from direct or natural-language quiz reply."""
+    if current_question not in RISK_QUIZ:
+        return None
+
+    text = user_input.strip()
+    lower = text.lower()
+
+    # Explicit single-letter input.
+    explicit = re.fullmatch(r"\s*([ab])\s*", lower)
+    if explicit:
+        return explicit.group(1).upper()
+
+    # Prefix forms like "A. ...", "B) ...", "a - ...".
+    prefix = re.match(r"^\s*([ab])(?:\b|[\).:\-])", lower)
+    if prefix:
+        return prefix.group(1).upper()
+
+    # Direct phrasing forms.
+    if _contains_any(lower, ["option a", "choose a", "pick a", "answer is a", "go with a"]):
+        return "A"
+    if _contains_any(lower, ["option b", "choose b", "pick b", "answer is b", "go with b"]):
+        return "B"
+
+    # Natural-language semantic-ish match via option text overlap.
+    q = RISK_QUIZ[current_question]
+    option_a = str(q["options"]["A"])
+    option_b = str(q["options"]["B"])
+    user_tokens = _tokenize(lower)
+    score_a = _option_overlap_score(user_tokens, option_a)
+    score_b = _option_overlap_score(user_tokens, option_b)
+
+    threshold = 0.25
+    if score_a >= threshold or score_b >= threshold:
+        if score_a > score_b:
+            return "A"
+        if score_b > score_a:
+            return "B"
+
+    return None
+
+
 @tool("advance_risk_quiz_tool")
 def advance_risk_quiz_tool(user_input: str, current_question: int, answers: dict[str, str] | None = None) -> dict[str, Any]:
     """Advance deterministic risk-quiz state and return either next question or final score."""
     answers = answers or {}
     normalized_answers = {int(k): str(v).upper() for k, v in answers.items()}
-    text = user_input.strip().lower()
+    choice = extract_quiz_choice(user_input, current_question)
 
-    if re.fullmatch(r"[ab]", text) and current_question <= len(RISK_QUIZ):
-        normalized_answers[current_question] = text.upper()
+    if choice and current_question <= len(RISK_QUIZ):
+        normalized_answers[current_question] = choice
         current_question += 1
 
     if current_question <= len(RISK_QUIZ):
@@ -85,7 +145,7 @@ def advance_risk_quiz_tool(user_input: str, current_question: int, answers: dict
                 f"A. {q['options']['A']}\n"
                 f"B. {q['options']['B']}\n\n"
                 f"Tip: {q.get('followup_tip', '')}\n\n"
-                "Reply with A or B."
+                "Reply with A/B, or answer in your own words."
             ),
         }
 

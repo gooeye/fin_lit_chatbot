@@ -78,7 +78,16 @@ class RiskQuizAgent:
                     profile = result.get("profile")
                     if profile:
                         state["risk_profile_result"] = str(profile)
-                    if str(result.get("status", "")) == "complete":
+                    result_status = str(result.get("status", ""))
+                    if result_status == "ask_question":
+                        option_a = str(result.get("option_a", "")).strip()
+                        option_b = str(result.get("option_b", "")).strip()
+                        if option_a and option_b:
+                            state["follow_up_suggestions"] = [
+                                f"A. {option_a}",
+                                f"B. {option_b}",
+                            ]
+                    if result_status == "complete":
                         next_steps = result.get("next_steps", [])
                         if isinstance(next_steps, list):
                             cleaned = [str(x).strip() for x in next_steps if str(x).strip()]
