@@ -15,6 +15,7 @@ jobs:
       VM_USER: ${{ secrets.GCP_VM_USER }}
       VM_PORT: ${{ secrets.GCP_VM_PORT }}
       VM_TARGET_DIR: ${{ secrets.GCP_VM_TARGET_DIR }}
+      VM_SHARED_GROUP: ${{ secrets.GCP_VM_SHARED_GROUP }}
 
     steps:
       - name: Checkout repository
@@ -30,6 +31,7 @@ jobs:
         run: |
           echo "VM_PORT=${VM_PORT:-22}" >> $GITHUB_ENV
           echo "VM_TARGET_DIR=${VM_TARGET_DIR:-/home/$VM_USER/fin_lit_chatbot}" >> $GITHUB_ENV
+          echo "VM_SHARED_GROUP=${VM_SHARED_GROUP:-$VM_USER}" >> $GITHUB_ENV
 
       - name: Start SSH agent and add key
         uses: webfactory/ssh-agent@v0.9.0
@@ -44,6 +46,29 @@ jobs:
       - name: Ensure target directory exists on VM
         run: |
           ssh -p "$VM_PORT" "$VM_USER@$VM_HOST" "mkdir -p '$VM_TARGET_DIR'"
+
+      - name: Ensure VM target directory is writable
+        run: |
+          ssh -p "$VM_PORT" "$VM_USER@$VM_HOST" "
+            set -e
+            mkdir -p '$VM_TARGET_DIR'
+            if [ ! -w '$VM_TARGET_DIR' ]; then
+              if sudo -n true >/dev/null 2>&1; then
+                if ! getent group '$VM_SHARED_GROUP' >/dev/null 2>&1; then
+                  sudo groupadd '$VM_SHARED_GROUP'
+                fi
+                sudo usermod -a -G '$VM_SHARED_GROUP' '$VM_USER'
+                sudo chgrp -R '$VM_SHARED_GROUP' '$VM_TARGET_DIR'
+                sudo chmod -R g+rwX '$VM_TARGET_DIR'
+                sudo find '$VM_TARGET_DIR' -type d -exec chmod g+s {} +
+              else
+                echo 'No write permission on target dir and passwordless sudo is unavailable.'
+                echo 'Fix perms manually with a shared group, e.g.:'
+                echo '  sudo chgrp -R <group> $VM_TARGET_DIR; sudo chmod -R g+rwX $VM_TARGET_DIR'
+                exit 1
+              fi
+            fi
+          "
 
       - name: Ensure rsync exists on runner
         run: |
@@ -76,8 +101,23 @@ jobs:
           rsync -az --delete \
             --exclude '.git/' \
             --exclude '.venv/' \
+            --exclude '.env' \
+            --exclude '.env.*' \
             --exclude '.chroma/' \
+            --exclude 'data/' \
             --exclude '__pycache__/' \
             --exclude '*.pyc' \
             -e "ssh -p $VM_PORT" \
             ./ "$VM_USER@$VM_HOST:$VM_TARGET_DIR/"
+
+      - name: Restart app with Docker Compose on VM
+        run: |
+          ssh -p "$VM_PORT" "$VM_USER@$VM_HOST" '
+            set -e
+            cd "$VM_TARGET_DIR"
+            if docker compose version >/dev/null 2>&1; then
+              docker compose up -d --build
+            else
+              sudo docker compose up -d --build
+            fi
+          '
