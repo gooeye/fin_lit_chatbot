@@ -16,6 +16,39 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+if "disclaimer_accepted" not in st.session_state:
+    st.session_state.disclaimer_accepted = False
+if "disclaimer_exited" not in st.session_state:
+    st.session_state.disclaimer_exited = False
+
+if not st.session_state.disclaimer_accepted and not st.session_state.disclaimer_exited:
+    st.title("Disclaimer")
+    st.info(
+        "Before we begin:\n"
+        "This chatbot provides general financial information only and does not constitute financial advice. "
+        "We are not regulated by the Monetary Authority of Singapore (MAS) as a financial adviser. "
+        "The information provided does not consider your personal financial situation or objectives.\n\n"
+        "Do you acknowledge and wish to continue?"
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Yes, continue", use_container_width=True, type="primary"):
+            st.session_state.disclaimer_accepted = True
+            st.session_state.disclaimer_exited = False
+            st.rerun()
+    with col2:
+        if st.button("Exit", use_container_width=True):
+            st.session_state.disclaimer_accepted = False
+            st.session_state.disclaimer_exited = True
+            st.rerun()
+
+    st.stop()
+
+if st.session_state.disclaimer_exited:
+    st.warning("You chose to exit. Refresh the page if you want to continue later.")
+    st.stop()
+
 if "bot" not in st.session_state:
     st.session_state.bot = FinLitBot()
 if "state" not in st.session_state:
