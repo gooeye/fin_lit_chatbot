@@ -112,6 +112,7 @@ jobs:
       - name: Sync repository to VM
         run: |
           rsync -az --delete \
+            --no-perms \
             --no-times \
             --omit-dir-times \
             --no-owner \
