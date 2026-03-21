@@ -99,6 +99,8 @@ jobs:
       - name: Sync repository to VM
         run: |
           rsync -az --delete \
+            --no-owner \
+            --no-group \
             --exclude '.git/' \
             --exclude '.venv/' \
             --exclude '.env' \
