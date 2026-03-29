@@ -18,6 +18,7 @@ Minimal financial literacy chatbot built with:
 
 	- `OPENROUTER_API_KEY`
 	- `LANGSMITH_API_KEY`
+  - `TELEGRAM_BOT_TOKEN` (only if using Telegram bot)
 
 3. Install dependencies (already UV-managed):
 
@@ -29,6 +30,14 @@ uv sync
 
 ```bash
 uv run streamlit run app.py
+```
+
+## 2a) Run Telegram bot
+
+The Telegram bot supports clickable inline follow-up buttons after each answer.
+
+```bash
+uv run finlit-telegram
 ```
 
 ## 2b) Run with Docker

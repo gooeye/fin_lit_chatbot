@@ -26,6 +26,16 @@ class FinLitBot:
         self._token_callback: Callable[[str], None] | None = None
         self._graph = self._build_graph()
 
+    def _invoke_config(self, state: ChatState, channel: str) -> dict:
+        return {
+            "tags": ["finlit", channel, "langgraph"],
+            "metadata": {
+                "channel": channel,
+                "topic": state.get("topic", "unknown"),
+                "task_type": state.get("task_type", "unknown"),
+            },
+        }
+
     def _build_chat_model(self, model: str, temperature: float) -> ChatOpenAI:
         return ChatOpenAI(
             model=model,
@@ -94,18 +104,12 @@ class FinLitBot:
 
         return builder.compile()
 
-    def respond(self, state: ChatState, user_query: str) -> ChatState:
+    def respond(self, state: ChatState, user_query: str, channel: str = "streamlit") -> ChatState:
         input_state = self._build_input_state(state, user_query)
 
         result: ChatState = self._graph.invoke(
             input_state,
-            config={
-                "tags": ["finlit", "streamlit", "langgraph"],
-                "metadata": {
-                    "topic": input_state.get("topic", "unknown"),
-                    "task_type": input_state.get("task_type", "unknown"),
-                },
-            },
+            config=self._invoke_config(input_state, channel),
         )
 
         messages = list(result.get("messages", []))
@@ -119,6 +123,7 @@ class FinLitBot:
         user_query: str,
         on_status: Callable[[str], None] | None = None,
         on_token: Callable[[str], None] | None = None,
+        channel: str = "streamlit",
     ) -> ChatState:
         input_state = self._build_input_state(state, user_query)
         self._status_callback = on_status
@@ -130,13 +135,7 @@ class FinLitBot:
         try:
             result: ChatState = self._graph.invoke(
                 input_state,
-                config={
-                    "tags": ["finlit", "streamlit", "langgraph"],
-                    "metadata": {
-                        "topic": input_state.get("topic", "unknown"),
-                        "task_type": input_state.get("task_type", "unknown"),
-                    },
-                },
+                config=self._invoke_config(input_state, channel),
             )
         finally:
             self._status_callback = None
@@ -147,7 +146,7 @@ class FinLitBot:
         result["messages"] = messages
         return result
 
-    def respond_with_progress(self, state: ChatState, user_query: str):
+    def respond_with_progress(self, state: ChatState, user_query: str, channel: str = "streamlit"):
         input_state = self._build_input_state(state, user_query)
         final_state: ChatState = input_state
 
@@ -169,13 +168,7 @@ class FinLitBot:
         for event in self._graph.stream(
             input_state,
             stream_mode="updates",
-            config={
-                "tags": ["finlit", "streamlit", "langgraph"],
-                "metadata": {
-                    "topic": input_state.get("topic", "unknown"),
-                    "task_type": input_state.get("task_type", "unknown"),
-                },
-            },
+            config=self._invoke_config(input_state, channel),
         ):
             if not isinstance(event, dict):
                 continue
