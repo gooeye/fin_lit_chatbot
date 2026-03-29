@@ -9,3 +9,13 @@ services:
     volumes:
       - ./.chroma:/app/.chroma
       - ./data:/app/data
+
+  finlit-telegram:
+    build: .
+    container_name: finlit-telegram-bot
+    command: ["finlit-telegram"]
+    env_file:
+      - .env
+    volumes:
+      - ./.chroma:/app/.chroma
+      - ./data:/app/data

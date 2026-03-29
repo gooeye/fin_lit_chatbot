@@ -49,7 +49,7 @@ docker build -t finlit-chatbot .
 docker run --rm -p 8501:8501 --env-file .env finlit-chatbot
 ```
 
-Or with Compose (persists Chroma locally):
+Or with Compose (persists Chroma locally, starts Streamlit + Telegram bot):
 
 ```bash
 docker compose up --build
