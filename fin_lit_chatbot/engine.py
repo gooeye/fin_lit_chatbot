@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from urllib.parse import urlparse
 
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
@@ -194,10 +195,57 @@ class FinLitBot:
             "follow_up_suggestions": [],
             "structured_task_status": "idle",
             "structured_task_type": "",
+            "retrieved_chunks": [],
+            "retrieved_summary": "",
             "active_query": user_query,
             "rephrase_attempts": 0,
             "needs_rephrase": False,
         }
+
+    def _is_http_url(self, value: str) -> bool:
+        parsed = urlparse(value.strip())
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    def _build_source_transparency_section(self, state: ChatState) -> str:
+        if not self.settings.source_transparency:
+            return ""
+
+        docs = state.get("retrieved_chunks", [])
+        if not docs:
+            return ""
+
+        seen: set[str] = set()
+        links: list[str] = []
+        non_links: list[str] = []
+
+        max_items = max(1, self.settings.source_transparency_max_items)
+        for d in docs:
+            source = str(d.get("source", "")).strip()
+            if not source or source in seen:
+                continue
+            seen.add(source)
+
+            if self._is_http_url(source):
+                links.append(source)
+            else:
+                non_links.append(source)
+
+            if len(links) + len(non_links) >= max_items:
+                break
+
+        if not links and not non_links:
+            return ""
+
+        lines = ["Sources:"]
+        index = 1
+        for link in links:
+            lines.append(f"{index}. [{index}]({link})")
+            index += 1
+        for source in non_links:
+            lines.append(f"{index}. {source}")
+            index += 1
+
+        return "\n".join(lines)
 
     def _emit_status(self, message: str) -> None:
         if self._status_callback:
@@ -808,6 +856,10 @@ class FinLitBot:
             state["follow_up_suggestions"] = suggestions[:2]
             if question:
                 body += f"\n\n{question}"
+
+        sources_section = self._build_source_transparency_section(state)
+        if sources_section:
+            body += f"\n\n{sources_section}"
 
         follow_ups = state.get("follow_up_suggestions", [])
         if follow_ups:

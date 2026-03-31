@@ -76,6 +76,7 @@ uv run finlit-ingest --folder data/money_txt --topic money_management
 - Chroma is persisted locally on disk at `RAG_CHROMA_DIR` (default `.chroma/`).
 - No financial knowledge is hardcoded in code. Seed own `.txt/.pdf` corpus into Chroma.
 - RAG parameters are configured via `.env` (`RAG_*` variables).
+- Source transparency is enabled by default and appends numbered source links for grounded RAG answers (`SOURCE_TRANSPARENCY`, `SOURCE_TRANSPARENCY_MAX_ITEMS`).
 - Risk quiz remains deterministic in code.
 - Two knowledge routes are implemented:
   - `investment_education`

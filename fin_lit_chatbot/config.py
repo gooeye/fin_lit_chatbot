@@ -8,6 +8,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     openrouter_api_key: str | None = os.getenv("OPENROUTER_API_KEY")
@@ -19,6 +26,8 @@ class Settings:
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
     fast_model: str = os.getenv("FAST_MODEL", "openai/gpt-4.1-mini")
     smart_model: str = os.getenv("SMART_MODEL", "openai/gpt-4.1")
+    source_transparency: bool = _env_bool("SOURCE_TRANSPARENCY", True)
+    source_transparency_max_items: int = int(os.getenv("SOURCE_TRANSPARENCY_MAX_ITEMS", "3"))
 
     def openrouter_headers(self) -> dict[str, str]:
         return {
