@@ -6,10 +6,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml README.md app.py /app/
+COPY pyproject.toml README.md /app/
+
+RUN pip install --upgrade pip && python - <<'PY'
+from pathlib import Path
+import subprocess
+import tomllib
+
+pyproject = tomllib.loads(Path("/app/pyproject.toml").read_text(encoding="utf-8"))
+dependencies = pyproject.get("project", {}).get("dependencies", [])
+if dependencies:
+    subprocess.check_call(["pip", "install", *dependencies])
+PY
+
+COPY app.py /app/
 COPY fin_lit_chatbot /app/fin_lit_chatbot
 
-RUN pip install --upgrade pip && pip install .
+RUN pip install --no-deps .
 
 EXPOSE 8501
 
