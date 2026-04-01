@@ -154,11 +154,34 @@ async def _reply_text(
     message,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
-) -> None:
+) -> object | None:
     try:
-        await message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+        return await message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
     except Exception:
-        await message.reply_text(text, reply_markup=reply_markup)
+        return await message.reply_text(text, reply_markup=reply_markup)
+
+
+def _progress_text(status: str) -> str:
+    clean_status = status.strip() or "Working on your reply..."
+    return f"Working on it...\n\n{clean_status}"
+
+
+async def _update_progress_message(progress_message, text: str) -> None:
+    if progress_message is None:
+        return
+    try:
+        await progress_message.edit_text(text)
+    except Exception:
+        pass
+
+
+async def _delete_progress_message(progress_message) -> None:
+    if progress_message is None:
+        return
+    try:
+        await progress_message.delete()
+    except Exception:
+        pass
 
 
 async def _send_response(
@@ -190,9 +213,36 @@ async def _process_prompt(
     if state is None:
         state = _initial_state()
 
-    new_state = bot.respond(state, user_input, channel="telegram")
-    context.chat_data["state"] = new_state
-    await _send_response(update, context, new_state)
+    reply_target = update.callback_query.message if update.callback_query else update.message
+    progress_message = None
+    last_progress_text = ""
+    final_state = state
+
+    if reply_target is not None:
+        last_progress_text = _progress_text("Starting...")
+        progress_message = await _reply_text(reply_target, last_progress_text)
+
+    try:
+        for event in bot.respond_with_progress(state, user_input, channel="telegram"):
+            if not isinstance(event, dict):
+                continue
+
+            if event.get("type") == "status":
+                next_progress_text = _progress_text(str(event.get("message", "")))
+                if next_progress_text != last_progress_text:
+                    await _update_progress_message(progress_message, next_progress_text)
+                    last_progress_text = next_progress_text
+                continue
+
+            if event.get("type") == "final":
+                maybe_state = event.get("state")
+                if isinstance(maybe_state, dict):
+                    final_state = maybe_state
+    finally:
+        await _delete_progress_message(progress_message)
+
+    context.chat_data["state"] = final_state
+    await _send_response(update, context, final_state)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
