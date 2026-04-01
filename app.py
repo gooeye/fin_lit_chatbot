@@ -3,6 +3,7 @@ from __future__ import annotations
 import streamlit as st
 
 from fin_lit_chatbot.engine import ChatState, FinLitBot
+from fin_lit_chatbot.payloads import normalize_payload_list, payload_from_text, payload_text
 
 st.set_page_config(page_title="FinLit Tutor", page_icon="💬", layout="wide")
 
@@ -54,8 +55,14 @@ if "bot" not in st.session_state:
 if "state" not in st.session_state:
     st.session_state.state = ChatState(
         follow_up_suggestions=[
-            "I want to start with money management",
-            "I want to start with investment education",
+            payload_from_text(
+                "I want to start with money management",
+                code="topic.start.money_management",
+            ),
+            payload_from_text(
+                "I want to start with investment education",
+                code="topic.start.investment_education",
+            ),
         ],
         messages=[
             {
@@ -80,11 +87,16 @@ st.caption("Beginner-friendly finance education with LangGraph + Chroma + OpenRo
 with st.sidebar:
     st.subheader("Quick actions")
     if st.button("Start risk quiz", use_container_width=True):
-        st.session_state.queued_user_prompt = "Start risk quiz"
+        st.session_state.queued_user_input = payload_from_text("Start risk quiz", code="quiz.start")
     if st.button("Build a simple budget", use_container_width=True):
-        st.session_state.queued_user_prompt = "Help me make a budget"
+        st.session_state.queued_user_input = payload_from_text(
+            "Help me make a budget",
+            code="tool.calculate.budget",
+        )
     if st.button("Stocks vs bonds", use_container_width=True):
-        st.session_state.queued_user_prompt = "What is the difference between stocks and bonds?"
+        st.session_state.queued_user_input = payload_from_text(
+            "What is the difference between stocks and bonds?"
+        )
 
     st.divider()
     st.markdown("### Session snapshot")
@@ -101,7 +113,7 @@ for msg in state.get("messages", []):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-suggestions = state.get("follow_up_suggestions", [])
+suggestions = normalize_payload_list(state.get("follow_up_suggestions", []))
 messages = state.get("messages", [])
 if suggestions and messages and messages[-1].get("role") == "assistant":
     st.markdown("#### Suggested replies")
@@ -109,15 +121,21 @@ if suggestions and messages and messages[-1].get("role") == "assistant":
     for i, suggestion in enumerate(suggestions):
         col = cols[i % len(cols)]
         with col:
-            if st.button(suggestion, use_container_width=True, key=f"followup_{len(messages)}_{i}_{suggestion}"):
-                st.session_state.queued_user_prompt = suggestion
+            suggestion_text = payload_text(suggestion)
+            suggestion_code = suggestion.get("code", "")
+            if st.button(
+                suggestion_text,
+                use_container_width=True,
+                key=f"followup_{len(messages)}_{i}_{suggestion_code}_{suggestion_text}",
+            ):
+                st.session_state.queued_user_input = suggestion
 
-prefill = st.session_state.pop("queued_user_prompt", None)
-user_prompt = st.chat_input("Ask about investing, budgeting, debt, cards, or insurance")
-if prefill and not user_prompt:
-    user_prompt = prefill
+queued_user_input = st.session_state.pop("queued_user_input", None)
+typed_user_prompt = st.chat_input("Ask about investing, budgeting, debt, cards, or insurance")
+user_input = typed_user_prompt if typed_user_prompt else queued_user_input
 
-if user_prompt:
+if user_input:
+    user_prompt = payload_text(user_input) if not isinstance(user_input, str) else user_input
     with st.chat_message("user"):
         st.markdown(user_prompt)
 
@@ -135,7 +153,7 @@ if user_prompt:
 
         new_state = bot.respond_live(
             state,
-            user_prompt,
+            user_input,
             on_status=on_status,
             on_token=on_token,
         )

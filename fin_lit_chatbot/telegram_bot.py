@@ -17,6 +17,13 @@ from telegram.ext import (
 
 from fin_lit_chatbot.config import Settings
 from fin_lit_chatbot.engine import ChatState, FinLitBot
+from fin_lit_chatbot.payloads import (
+    normalize_message_payload,
+    normalize_payload_list,
+    payload_from_text,
+    payload_text,
+)
+from fin_lit_chatbot.schema import UserInput
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +35,20 @@ MAX_TELEGRAM_MESSAGE_LEN: Final[int] = 4096
 def _initial_state() -> ChatState:
     return ChatState(
         follow_up_suggestions=[
-            "I want to start with money management",
-            "I want to start with investment education",
+            payload_from_text(
+                "I want to start with money management",
+                code="topic.start.money_management",
+            ),
+            payload_from_text(
+                "I want to start with investment education",
+                code="topic.start.investment_education",
+            ),
         ],
         messages=[
             {
                 "role": "assistant",
                 "content": (
-                    "Hi! I’m your financial literacy tutor.\n\n"
+                    "Hi! I'm your financial literacy tutor.\n\n"
                     "We can start with either:\n"
                     "- Money management\n"
                     "- Investment education\n\n"
@@ -101,7 +114,7 @@ def _consent_markup() -> InlineKeyboardMarkup:
 
 def _build_follow_up_callback_items(
     context: ContextTypes.DEFAULT_TYPE,
-    suggestions: list[str],
+    suggestions: list[object],
 ) -> list[tuple[str, str]]:
     follow_up_map = context.chat_data.get("follow_up_map")
     if not isinstance(follow_up_map, dict):
@@ -109,12 +122,12 @@ def _build_follow_up_callback_items(
         context.chat_data["follow_up_map"] = follow_up_map
 
     callback_items: list[tuple[str, str]] = []
-    for suggestion in suggestions:
-        cleaned = suggestion.strip()
+    for suggestion in normalize_payload_list(suggestions):
+        cleaned = payload_text(suggestion)
         if not cleaned:
             continue
         callback_key = secrets.token_urlsafe(6)
-        follow_up_map[callback_key] = cleaned
+        follow_up_map[callback_key] = suggestion
         callback_items.append((cleaned, callback_key))
 
     return callback_items
@@ -127,7 +140,7 @@ async def _send_intro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.chat_data["state"] = state
 
     intro = str(state.get("messages", [{}])[-1].get("content", ""))
-    suggestions = list(state.get("follow_up_suggestions", []))
+    suggestions = normalize_payload_list(state.get("follow_up_suggestions", []))
     callback_items = _build_follow_up_callback_items(context, suggestions)
     markup = _follow_up_markup(callback_items)
 
@@ -154,7 +167,7 @@ async def _send_response(
     state: ChatState,
 ) -> None:
     response_text = _strip_embedded_suggestions(str(state.get("response_draft", "")))
-    suggestions = list(state.get("follow_up_suggestions", []))
+    suggestions = normalize_payload_list(state.get("follow_up_suggestions", []))
     callback_items = _build_follow_up_callback_items(context, suggestions)
     markup = _follow_up_markup(callback_items)
     chunks = _chunk_text(response_text)
@@ -170,14 +183,14 @@ async def _send_response(
 async def _process_prompt(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    user_prompt: str,
+    user_input: UserInput,
 ) -> None:
     bot = context.application.bot_data["finlit_bot"]
     state = context.chat_data.get("state")
     if state is None:
         state = _initial_state()
 
-    new_state = bot.respond(state, user_prompt, channel="telegram")
+    new_state = bot.respond(state, user_input, channel="telegram")
     context.chat_data["state"] = new_state
     await _send_response(update, context, new_state)
 
@@ -219,7 +232,7 @@ async def handle_disclaimer_callback(update: Update, context: ContextTypes.DEFAU
     context.chat_data["disclaimer_pending"] = False
     context.chat_data["disclaimer_accepted"] = False
     if query.message:
-        await _reply_text(query.message, "Understood. I won’t proceed. Send /start anytime if you change your mind.")
+        await _reply_text(query.message, "Understood. I won't proceed. Send /start anytime if you change your mind.")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -261,10 +274,13 @@ async def handle_follow_up_callback(update: Update, context: ContextTypes.DEFAUL
         await query.answer("That option is no longer available. Please pick a newer option.", show_alert=True)
         return
 
-    if query.message:
-        await _reply_text(query.message, f"Selected option: {selected}")
+    selected_payload = normalize_message_payload(selected) or payload_from_text(str(selected).strip())
+    selected_text = payload_text(selected_payload)
 
-    await _process_prompt(update, context, selected)
+    if query.message:
+        await _reply_text(query.message, f"Selected option: {selected_text}")
+
+    await _process_prompt(update, context, selected_payload)
 
 
 def main() -> None:

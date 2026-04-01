@@ -9,9 +9,17 @@ from langgraph.graph import END, START, StateGraph
 
 from fin_lit_chatbot.config import Settings
 from fin_lit_chatbot.constants import RISK_QUIZ
+from fin_lit_chatbot.payloads import (
+    canonicalize_payload_code,
+    infer_deterministic_code_from_text,
+    is_known_deterministic_code,
+    normalize_message_payload,
+    normalize_payload_list,
+    payload_text,
+)
 from fin_lit_chatbot.rag import RagService
 from fin_lit_chatbot.routing import fallback_route_intent, parse_router_json
-from fin_lit_chatbot.schema import ChatState
+from fin_lit_chatbot.schema import ChatState, FollowUpPayload, UserInput
 from fin_lit_chatbot.subgraph_agents import StructuredToolsAgent
 from fin_lit_chatbot.tools import extract_quiz_choice
 
@@ -34,6 +42,9 @@ class FinLitBot:
                 "channel": channel,
                 "topic": state.get("topic", "unknown"),
                 "task_type": state.get("task_type", "unknown"),
+                "button_code": state.get("button_code", ""),
+                "button_code_known": bool(state.get("button_code_known", False)),
+                "deterministic_requested": bool(state.get("button_code", "")),
             },
         }
 
@@ -50,6 +61,7 @@ class FinLitBot:
         builder = StateGraph(ChatState)
         builder.add_node("ingest_input", self.ingest_input)
         builder.add_node("load_session_context", self.load_session_context)
+        builder.add_node("deterministic_preprocessor", self.deterministic_preprocessor)
         builder.add_node("intent_topic_router", self.intent_topic_router)
         builder.add_node("follow_up_question", self.follow_up_question)
         builder.add_node("structured_handover", self.structured_handover)
@@ -63,7 +75,8 @@ class FinLitBot:
 
         builder.add_edge(START, "ingest_input")
         builder.add_edge("ingest_input", "load_session_context")
-        builder.add_edge("load_session_context", "intent_topic_router")
+        builder.add_edge("load_session_context", "deterministic_preprocessor")
+        builder.add_edge("deterministic_preprocessor", "intent_topic_router")
         builder.add_conditional_edges(
             "intent_topic_router",
             self.route_from_router,
@@ -105,8 +118,8 @@ class FinLitBot:
 
         return builder.compile()
 
-    def respond(self, state: ChatState, user_query: str, channel: str = "streamlit") -> ChatState:
-        input_state = self._build_input_state(state, user_query)
+    def respond(self, state: ChatState, user_input: UserInput, channel: str = "streamlit") -> ChatState:
+        input_state = self._build_input_state(state, user_input)
 
         result: ChatState = self._graph.invoke(
             input_state,
@@ -121,12 +134,12 @@ class FinLitBot:
     def respond_live(
         self,
         state: ChatState,
-        user_query: str,
+        user_input: UserInput,
         on_status: Callable[[str], None] | None = None,
         on_token: Callable[[str], None] | None = None,
         channel: str = "streamlit",
     ) -> ChatState:
-        input_state = self._build_input_state(state, user_query)
+        input_state = self._build_input_state(state, user_input)
         self._status_callback = on_status
         self._token_callback = on_token
 
@@ -147,13 +160,14 @@ class FinLitBot:
         result["messages"] = messages
         return result
 
-    def respond_with_progress(self, state: ChatState, user_query: str, channel: str = "streamlit"):
-        input_state = self._build_input_state(state, user_query)
+    def respond_with_progress(self, state: ChatState, user_input: UserInput, channel: str = "streamlit"):
+        input_state = self._build_input_state(state, user_input)
         final_state: ChatState = input_state
 
         status_map = {
             "ingest_input": "Reading your message...",
             "load_session_context": "Loading session context...",
+            "deterministic_preprocessor": "Checking button action...",
             "intent_topic_router": "Thinking about what you said...",
             "follow_up_question": "Preparing follow-up options...",
             "query_rephraser": "Trying an alternate search query...",
@@ -185,12 +199,18 @@ class FinLitBot:
         final_state["messages"] = messages
         yield {"type": "final", "state": final_state}
 
-    def _build_input_state(self, state: ChatState, user_query: str) -> ChatState:
+    def _build_input_state(self, state: ChatState, user_input: UserInput) -> ChatState:
+        payload = normalize_message_payload(user_input)
+        user_query = payload["text"] if payload else str(user_input).strip()
+        button_code = payload.get("code", "") if payload else ""
+        button_meta = dict(payload.get("meta", {})) if payload and isinstance(payload.get("meta"), dict) else {}
         messages = list(state.get("messages", []))
-        messages.append({"role": "user", "content": user_query})
+        if user_query:
+            messages.append({"role": "user", "content": user_query})
         return {
             **state,
             "messages": messages,
+            "user_query": user_query,
             "response_draft": "",
             "follow_up_suggestions": [],
             "structured_task_status": "idle",
@@ -200,6 +220,12 @@ class FinLitBot:
             "active_query": user_query,
             "rephrase_attempts": 0,
             "needs_rephrase": False,
+            "button_text": user_query,
+            "button_code": button_code,
+            "button_meta": button_meta,
+            "button_code_known": is_known_deterministic_code(button_code),
+            "deterministic_route_used": False,
+            "preferred_structured_tool": "",
         }
 
     def _is_http_url(self, value: str) -> bool:
@@ -274,14 +300,16 @@ class FinLitBot:
     # Nodes
     def ingest_input(self, state: ChatState) -> ChatState:
         self._emit_status("Reading your question...")
-        state["user_query"] = state["messages"][-1]["content"].strip()
+        fallback_query = state["messages"][-1]["content"].strip() if state.get("messages") else ""
+        state["user_query"] = str(state.get("user_query", fallback_query)).strip() or fallback_query
+        state["button_text"] = str(state.get("button_text", state["user_query"])).strip() or state["user_query"]
         return state
 
     def load_session_context(self, state: ChatState) -> ChatState:
         self._emit_status("Loading session context...")
         state.setdefault("session_financials", {})
         state.setdefault("risk_quiz_state", {"current_question": 1, "answers": {}})
-        state.setdefault("follow_up_suggestions", [])
+        state["follow_up_suggestions"] = normalize_payload_list(state.get("follow_up_suggestions", []))
         state.setdefault("structured_task_status", "idle")
         state.setdefault("structured_task_type", "")
         state.setdefault("structured_completed_last_turn", False)
@@ -289,10 +317,83 @@ class FinLitBot:
         state.setdefault("active_query", state.get("user_query", ""))
         state.setdefault("rephrase_attempts", 0)
         state.setdefault("needs_rephrase", False)
+        state["button_code"] = canonicalize_payload_code(str(state.get("button_code", "")).strip())
+        state["button_meta"] = (
+            dict(state.get("button_meta", {}))
+            if isinstance(state.get("button_meta"), dict)
+            else {}
+        )
+        state.setdefault("button_text", state.get("user_query", ""))
+        state.setdefault("button_code_known", is_known_deterministic_code(state.get("button_code", "")))
+        state.setdefault("deterministic_route_used", False)
+        state.setdefault("preferred_structured_tool", "")
+        return state
+
+    def deterministic_preprocessor(self, state: ChatState) -> ChatState:
+        self._emit_status("Checking button action...")
+        code = canonicalize_payload_code(str(state.get("button_code", "")).strip())
+        state["button_code"] = code
+        state["button_code_known"] = is_known_deterministic_code(code)
+        state["deterministic_route_used"] = False
+        state["preferred_structured_tool"] = ""
+
+        if not code:
+            return state
+
+        if code == "topic.start.money_management":
+            state["topic"] = "money_management"
+            state["task_type"] = "follow_up"
+            state["deterministic_route_used"] = True
+            return state
+
+        if code == "topic.start.investment_education":
+            state["topic"] = "investment_education"
+            state["task_type"] = "follow_up"
+            state["deterministic_route_used"] = True
+            return state
+
+        if code == "quiz.start":
+            state["topic"] = "money_management"
+            state["task_type"] = "quiz"
+            state["preferred_structured_tool"] = "advance_risk_quiz_tool"
+            state["risk_quiz_state"] = {"current_question": 1, "answers": {}}
+            state["risk_profile_result"] = None
+            state["deterministic_route_used"] = True
+            return state
+
+        if code in {"quiz.answer.A", "quiz.answer.B"}:
+            state["topic"] = "money_management"
+            state["task_type"] = "quiz"
+            state["preferred_structured_tool"] = "advance_risk_quiz_tool"
+            state["deterministic_route_used"] = True
+            return state
+
+        if code == "tool.calculate.budget":
+            state["topic"] = "money_management"
+            state["task_type"] = "calculate"
+            state["preferred_structured_tool"] = "calculate_budget_tool"
+            state["deterministic_route_used"] = True
+            return state
+
+        if code == "tool.calculate.debt_example":
+            state["topic"] = "money_management"
+            state["task_type"] = "calculate"
+            state["preferred_structured_tool"] = "calculate_debt_example_tool"
+            state["deterministic_route_used"] = True
+            return state
+
+        if code == "tool.assess.insurance_needs":
+            state["topic"] = "money_management"
+            state["task_type"] = "assess"
+            state["preferred_structured_tool"] = "assess_insurance_needs_tool"
+            state["deterministic_route_used"] = True
         return state
 
     def intent_topic_router(self, state: ChatState) -> ChatState:
         self._emit_status("Routing to the right path...")
+        if state.get("deterministic_route_used"):
+            return state
+
         query = state["user_query"].strip()
 
         quiz_state = state.get("risk_quiz_state", {})
@@ -523,7 +624,7 @@ class FinLitBot:
         user_query: str,
         mode: str,
         max_suggestions: int,
-    ) -> tuple[str, list[str]]:
+    ) -> tuple[str, list[FollowUpPayload]]:
         recent_messages = state.get("messages", [])[-10:]
         history_lines: list[str] = []
         for msg in recent_messages:
@@ -562,7 +663,7 @@ class FinLitBot:
         prompt = (
             "You are generating follow-up UX prompts for a financial literacy chatbot.\n"
             "Return STRICT JSON only with this shape:\n"
-            "{\"question\": string, \"suggestions\": [{\"text\": string, \"type\": \"content\"|\"tool\"}, ...]}\n"
+            "{\"question\": string, \"suggestions\": [{\"text\": string, \"type\": \"content\"|\"tool\", \"code\": string?, \"meta\": object?}, ...]}\n"
             "No markdown. No extra text.\n\n"
             "Constraints:\n"
             "- question: one concise beginner-friendly question\n"
@@ -573,6 +674,9 @@ class FinLitBot:
             "- Each suggestion MUST include type='content' or type='tool'.\n"
             "- At most ONE suggestion may have type='tool'.\n"
             "- For tool type, only suggest existing tools: risk tolerance quiz, budget calculation, debt example calculation, insurance-needs assessment.\n"
+            "- code is optional. Include it only when a suggestion maps cleanly to a deterministic action.\n"
+            "- Allowed deterministic codes: quiz.start, tool.calculate.budget, tool.calculate.debt_example, tool.assess.insurance_needs.\n"
+            "- Use meta only when it adds structured context; otherwise omit it.\n"
             "- Avoid overlap/redundancy across suggestions.\n"
             "- Use learning phrasing (e.g., 'Learn about ...') rather than operational product actions.\n"
             "- suggestions must be concrete and immediately actionable\n"
@@ -599,13 +703,13 @@ class FinLitBot:
             "topic=money_management\n"
             "user=What is an emergency fund?\n"
             "Output:\n"
-            "{\"question\":\"Want to go one step deeper?\",\"suggestions\":[{\"text\":\"Learn about emergency fund sizing\",\"type\":\"content\"},{\"text\":\"Run budget calculation\",\"type\":\"tool\"}]}\n\n"
+            "{\"question\":\"Want to go one step deeper?\",\"suggestions\":[{\"text\":\"Learn about emergency fund sizing\",\"type\":\"content\"},{\"text\":\"Run budget calculation\",\"type\":\"tool\",\"code\":\"tool.calculate.budget\"}]}\n\n"
             "Input:\n"
             "mode=post_tool_completion\n"
             "topic=money_management\n"
             "user=cool\n"
             "Output:\n"
-            "{\"question\":\"Nice—what do you want to do next?\",\"suggestions\":[{\"text\":\"Learn about how loan interest works\",\"type\":\"content\"},{\"text\":\"Run debt example calculation\",\"type\":\"tool\"}]}\n\n"
+            "{\"question\":\"Nice—what do you want to do next?\",\"suggestions\":[{\"text\":\"Learn about how loan interest works\",\"type\":\"content\"},{\"text\":\"Run debt example calculation\",\"type\":\"tool\",\"code\":\"tool.calculate.debt_example\"}]}\n\n"
             f"Now generate output for:\nmode={mode}\ntopic={topic}\n"
             f"mode_instruction={mode_instructions.get(mode, '')}\n"
             f"user={user_query}\n"
@@ -623,7 +727,7 @@ class FinLitBot:
         if not parsed:
             repair_prompt = (
                 "Convert the following content into STRICT JSON with shape "
-                '{"question": string, "suggestions": [{"text": string, "type": "content"|"tool"}, ...]}. '
+                '{"question": string, "suggestions": [{"text": string, "type": "content"|"tool", "code"?: string, "meta"?: object}, ...]}. '
                 "No markdown. No extra text.\n\n"
                 f"Content:\n{text}"
             )
@@ -634,59 +738,69 @@ class FinLitBot:
         if parsed:
             question, suggestions = parsed
             normalized = self._normalize_follow_up_suggestions(suggestions)
-            deduped = [item["text"] for item in normalized]
-
             if question.strip():
                 if mode == "follow_up":
-                    return question.strip(), deduped[:max_suggestions]
-                return question.strip(), deduped[:2]
+                    return question.strip(), normalized[:max_suggestions]
+                return question.strip(), normalized[:2]
 
         fallback_question = "Could you share what you want to do next so I can guide you better?"
         return fallback_question, []
 
-    def _normalize_follow_up_suggestions(self, suggestions: list[dict[str, str]]) -> list[dict[str, str]]:
-        cleaned: list[dict[str, str]] = []
-        seen: set[str] = set()
+    def _normalize_follow_up_suggestions(self, suggestions: list[dict[str, object]]) -> list[FollowUpPayload]:
+        cleaned: list[FollowUpPayload] = []
+        seen_text: set[str] = set()
+        seen_codes: set[str] = set()
         tool_count = 0
 
         for item in suggestions:
-            text = str(item.get("text", "")).strip()
-            s_type = str(item.get("type", "content")).strip().lower()
-            if not text:
+            payload = normalize_message_payload(item)
+            if not payload:
                 continue
+
+            text = payload["text"]
+            s_type = str(item.get("type", "content")).strip().lower()
             if s_type not in {"content", "tool"}:
                 s_type = "content"
 
-            key = text.lower()
-            if key in seen:
+            code = canonicalize_payload_code(str(item.get("code", payload.get("code", ""))).strip())
+            meta = dict(payload.get("meta", {})) if isinstance(payload.get("meta"), dict) else {}
+
+            text_key = text.lower()
+            if text_key in seen_text:
                 continue
-            seen.add(key)
 
             if s_type == "tool":
-                if not self._is_supported_tool_suggestion(text):
+                code = code or infer_deterministic_code_from_text(text)
+                if not self._is_supported_tool_code(code):
                     continue
                 tool_count += 1
                 if tool_count > 1:
                     continue
 
-            cleaned.append({"text": text, "type": s_type})
+            if code and code in seen_codes:
+                continue
+
+            normalized: FollowUpPayload = {"text": text, "type": s_type}
+            if code:
+                normalized["code"] = code
+                seen_codes.add(code)
+            if meta:
+                normalized["meta"] = meta
+
+            seen_text.add(text_key)
+            cleaned.append(normalized)
 
         return cleaned
 
-    def _is_supported_tool_suggestion(self, text: str) -> bool:
-        lower = text.lower()
-        return any(
-            x in lower
-            for x in [
-                "risk tolerance quiz",
-                "budget calculation",
-                "debt example calculation",
-                "insurance-needs assessment",
-                "insurance needs assessment",
-            ]
-        )
+    def _is_supported_tool_code(self, code: str) -> bool:
+        return canonicalize_payload_code(code) in {
+            "quiz.start",
+            "tool.calculate.budget",
+            "tool.calculate.debt_example",
+            "tool.assess.insurance_needs",
+        }
 
-    def _parse_follow_up_json(self, text: str) -> tuple[str, list[dict[str, str]]] | None:
+    def _parse_follow_up_json(self, text: str) -> tuple[str, list[dict[str, object]]] | None:
         raw = text.strip()
         if not raw:
             return None
@@ -711,13 +825,20 @@ class FinLitBot:
             if not isinstance(suggestions_raw, list):
                 continue
 
-            suggestions: list[dict[str, str]] = []
+            suggestions: list[dict[str, object]] = []
             for item in suggestions_raw:
                 if isinstance(item, dict):
                     text_val = str(item.get("text", "")).strip()
                     type_val = str(item.get("type", "content")).strip().lower()
                     if text_val:
-                        suggestions.append({"text": text_val, "type": type_val})
+                        parsed_item: dict[str, object] = {"text": text_val, "type": type_val}
+                        code_val = str(item.get("code", "")).strip()
+                        if code_val:
+                            parsed_item["code"] = code_val
+                        meta_val = item.get("meta")
+                        if isinstance(meta_val, dict) and meta_val:
+                            parsed_item["meta"] = meta_val
+                        suggestions.append(parsed_item)
                 else:
                     # Backward compatibility if model returns string list.
                     s = str(item).strip()
@@ -861,9 +982,10 @@ class FinLitBot:
         if sources_section:
             body += f"\n\n{sources_section}"
 
-        follow_ups = state.get("follow_up_suggestions", [])
+        follow_ups = normalize_payload_list(state.get("follow_up_suggestions", []))
+        state["follow_up_suggestions"] = follow_ups
         if follow_ups:
-            bullets = "\n".join(f"- {x}" for x in follow_ups)
+            bullets = "\n".join(f"- {payload_text(x)}" for x in follow_ups)
             body += f"\n\nSuggested follow-ups:\n{bullets}"
         state["response_draft"] = body
         return state
