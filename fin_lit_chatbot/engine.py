@@ -167,8 +167,8 @@ class FinLitBot:
         status_map = {
             "ingest_input": "Reading your message...",
             "load_session_context": "Loading session context...",
-            "deterministic_preprocessor": "Checking button action...",
-            "intent_topic_router": "Thinking about what you said...",
+            "deterministic_preprocessor": "Thinking...",
+            "intent_topic_router": "Thinking...",
             "follow_up_question": "Preparing follow-up options...",
             "query_rephraser": "Trying an alternate search query...",
             "investment_knowledge": "Researching investment documents...",

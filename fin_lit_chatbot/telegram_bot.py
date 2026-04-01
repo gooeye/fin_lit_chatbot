@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import secrets
 from typing import Final
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -30,6 +32,7 @@ logger = logging.getLogger(__name__)
 FOLLOW_UP_CALLBACK_PREFIX: Final[str] = "fu:"
 CONSENT_CALLBACK_PREFIX: Final[str] = "consent:"
 MAX_TELEGRAM_MESSAGE_LEN: Final[int] = 4096
+PROGRESS_SPINNER_FRAMES: Final[tuple[str, ...]] = ("⠋", "⠙", "⠸", "⠴", "⠦", "⠇")
 
 
 def _initial_state() -> ChatState:
@@ -161,9 +164,80 @@ async def _reply_text(
         return await message.reply_text(text, reply_markup=reply_markup)
 
 
-def _progress_text(status: str) -> str:
-    clean_status = status.strip() or "Working on your reply..."
-    return f"Working on it...\n\n{clean_status}"
+def _progress_text(status: str, frame_index: int = 0) -> str:
+    clean_status = status.strip() or "Thinking..."
+    frame = PROGRESS_SPINNER_FRAMES[frame_index % len(PROGRESS_SPINNER_FRAMES)]
+    return f"{frame} {clean_status}"
+
+
+async def _send_typing_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    except Exception:
+        pass
+
+
+def _collect_progress_events(
+    bot: FinLitBot,
+    state: ChatState,
+    user_input: UserInput,
+    loop: asyncio.AbstractEventLoop,
+    progress_queue: asyncio.Queue,
+) -> None:
+    final_state: ChatState = state
+    try:
+        for event in bot.respond_with_progress(state, user_input, channel="telegram"):
+            if not isinstance(event, dict):
+                continue
+
+            event_type = str(event.get("type", "")).strip()
+            if event_type == "status":
+                loop.call_soon_threadsafe(
+                    progress_queue.put_nowait,
+                    ("status", str(event.get("message", ""))),
+                )
+                continue
+
+            if event_type == "final":
+                maybe_state = event.get("state")
+                if isinstance(maybe_state, dict):
+                    final_state = maybe_state
+
+        loop.call_soon_threadsafe(progress_queue.put_nowait, ("final", final_state))
+    except Exception as exc:
+        loop.call_soon_threadsafe(progress_queue.put_nowait, ("error", exc))
+
+
+async def _animate_progress_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    progress_message,
+    progress_state: dict[str, str],
+    stop_event: asyncio.Event,
+    *,
+    initial_frame_index: int = 0,
+    initial_text: str = "",
+) -> None:
+    frame_index = initial_frame_index
+    tick_count = 0
+    last_text = initial_text
+
+    while not stop_event.is_set():
+        current_text = _progress_text(progress_state.get("status", ""), frame_index)
+        if current_text != last_text:
+            await _update_progress_message(progress_message, current_text)
+            last_text = current_text
+
+        if tick_count % 8 == 0:
+            await _send_typing_action(context, chat_id)
+
+        frame_index += 1
+        tick_count += 1
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=0.3)
+        except asyncio.TimeoutError:
+            continue
 
 
 async def _update_progress_message(progress_message, text: str) -> None:
@@ -215,30 +289,63 @@ async def _process_prompt(
 
     reply_target = update.callback_query.message if update.callback_query else update.message
     progress_message = None
-    last_progress_text = ""
+    stop_progress_event = asyncio.Event()
+    progress_task: asyncio.Task | None = None
+    progress_state = {"status": "Starting..."}
     final_state = state
+    progress_queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
 
     if reply_target is not None:
-        last_progress_text = _progress_text("Starting...")
-        progress_message = await _reply_text(reply_target, last_progress_text)
+        await _send_typing_action(context, reply_target.chat_id)
+        initial_progress_text = _progress_text(progress_state["status"], 0)
+        progress_message = await _reply_text(reply_target, initial_progress_text)
+        progress_task = asyncio.create_task(
+            _animate_progress_message(
+                context,
+                reply_target.chat_id,
+                progress_message,
+                progress_state,
+                stop_progress_event,
+                initial_frame_index=1,
+                initial_text=initial_progress_text,
+            )
+        )
+
+    worker_task = asyncio.create_task(
+        asyncio.to_thread(
+            _collect_progress_events,
+            bot,
+            state,
+            user_input,
+            loop,
+            progress_queue,
+        )
+    )
 
     try:
-        for event in bot.respond_with_progress(state, user_input, channel="telegram"):
-            if not isinstance(event, dict):
+        while True:
+            event_type, payload = await progress_queue.get()
+            if event_type == "status":
+                progress_state["status"] = str(payload)
                 continue
 
-            if event.get("type") == "status":
-                next_progress_text = _progress_text(str(event.get("message", "")))
-                if next_progress_text != last_progress_text:
-                    await _update_progress_message(progress_message, next_progress_text)
-                    last_progress_text = next_progress_text
-                continue
+            if event_type == "final":
+                if isinstance(payload, dict):
+                    final_state = payload
+                break
 
-            if event.get("type") == "final":
-                maybe_state = event.get("state")
-                if isinstance(maybe_state, dict):
-                    final_state = maybe_state
+            if event_type == "error":
+                if isinstance(payload, Exception):
+                    raise payload
+                raise RuntimeError("Unexpected error while generating Telegram response.")
+
+        await worker_task
     finally:
+        stop_progress_event.set()
+        if progress_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await progress_task
         await _delete_progress_message(progress_message)
 
     context.chat_data["state"] = final_state
